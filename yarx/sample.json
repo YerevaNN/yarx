@@ -1,0 +1,127 @@
+{
+  "_line_": 2, // ?
+
+  "url": "https://doi.org/10.1016/S0014-5793(00)01105-4",
+  "text": "In vitro and in vivo binding assays between Pim-1 and HP1\u03b3.",
+
+  "entities": {
+    "Pim-1": {
+      "labels": [
+        "protein"
+      ],
+      "mentions": [
+        [
+          44,
+          48,
+          " ",
+          " "
+        ]
+      ],
+      "edges": [],
+      "labels_major": [
+        "protein"
+      ],
+      "exists": true
+    },
+    "HP1\u03b3": {
+      "labels": [
+        "protein"
+      ],
+      "mentions": [
+        [
+          54,
+          57,
+          " ",
+          "."
+        ]
+      ],
+      "edges": [],
+      "labels_major": [
+        "protein"
+      ],
+      "exists": true
+    }
+  },
+
+  "extracted_information": [
+    {
+      "contains_implicit_entity": false,
+      "label": 1,
+      "participant_ids": [
+        0,
+        1
+      ],
+      "participant_b": "HP1\u03b3",
+      "participant_a": "Pim-1",
+      "interaction_type": "bind"
+    }
+  ],
+
+  "paper_id": "22215280",
+
+  "entity_map": {
+    "Pim-1": 0,
+    "HP1\u03b3": 1
+  },
+
+  "id": "1.0alpha4.train.0",
+
+  "unique_entities": {
+    "1": {
+      "label_mutant": false,
+      "versions": {
+        "HP1\u03b3": {
+          "labels": [
+            "protein"
+          ],
+          "mentions": [
+            [
+              54,
+              57,
+              " ",
+              "."
+            ]
+          ],
+          "edges": [],
+          "labels_major": [
+            "protein"
+          ],
+          "exists": true
+        }
+      },
+      "labels_major": [
+        "protein"
+      ],
+      "all_implicit": false,
+      "label_state": false
+    },
+    "0": {
+      "label_mutant": false,
+      "versions": {
+        "Pim-1": {
+          "labels": [
+            "protein"
+          ],
+          "mentions": [
+            [
+              44,
+              48,
+              " ",
+              " "
+            ]
+          ],
+          "edges": [],
+          "labels_major": [
+            "protein"
+          ],
+          "exists": true
+        }
+      },
+      "labels_major": [
+        "protein"
+      ],
+      "all_implicit": false,
+      "label_state": false
+    }
+  }
+}
