@@ -69,17 +69,17 @@ class BioRelExDatasetReader(SciERCReader):
             clusters: List[List[Tuple[int, int]]] = []
             ner_labels: List[Tuple[Tuple[int, int], str]] = []
             for idx, entity in enumerate(entities):
-                cluster = []
+                cluster = set()
                 ner_label = entity['label']
                 for name, mentions in entity['names'].items():
                     for begin, end in mentions['mentions']:
                         first = char_to_token_id[begin]
                         last = char_to_token_id[end - 1]
                         position = (first, last)
-                        cluster.append(position)
+                        cluster.add(position)
                         ner_labels.append((position, ner_label))
 
-                clusters.append(cluster)
+                clusters.append(list(cluster))
 
             sentences_ner_labels = [ner_labels]
         else:
