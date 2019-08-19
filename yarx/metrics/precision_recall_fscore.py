@@ -1,4 +1,4 @@
-from sklearn.metrics import precision_recall_fscore_support, confusion_matrix
+from sklearn.metrics import precision_recall_fscore_support, multilabel_confusion_matrix
 from allennlp.training.metrics import Metric
 
 from typing import Any, Dict, List, Tuple, Union, Iterable
@@ -50,20 +50,29 @@ class PrecisionRecallFScore(Metric):
                                                labels=self._labels,
                                                average=self._average,
                                                pos_label=self._pos_label)
-
+        cm = multilabel_confusion_matrix(y_true, y_pred, labels=self._labels)
         if reset:
             self.reset()
 
         # Now we have precision, recall and f_beta score for all the labels
         # We are going to report scores for all the labels besides null-label.
         scores = dict()
-        for name, precision, recall, fscore, support in zip(self._labels, *prfs):
-            if not name:
+        for class_name, *class_prfs, class_cm in zip(self._labels, *prfs, cm):
+            precision, recall, fscore, support = class_prfs
+            (tn, fp), (fn, tp) = class_cm
+
+            if not class_name:
                 continue
-            scores[f'{name}_precision'] = float(precision)
-            scores[f'{name}_recall'] = float(recall)
-            scores[f'{name}_f{self._beta}'] = float(fscore)
-            scores[f'{name}_support'] = int(support)
+
+            scores[f'{class_name}_precision'] = float(precision)
+            scores[f'{class_name}_recall'] = float(recall)
+            scores[f'{class_name}_f{self._beta}'] = float(fscore)
+            scores[f'{class_name}_support'] = int(support)
+
+            scores[f'{class_name}_tn'] = int(tn)
+            scores[f'{class_name}_fp'] = int(fp)
+            scores[f'{class_name}_fn'] = int(fn)
+            scores[f'{class_name}_tp'] = int(tp)
 
         return scores
 
