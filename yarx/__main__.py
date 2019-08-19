@@ -27,7 +27,6 @@ from allennlp.training.util import evaluate
 import yarx
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
-logging.disable(logging.INFO)
 
 
 class EvaluateDetailed(Subcommand):
