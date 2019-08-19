@@ -36,19 +36,22 @@ class BioRelExDatasetReader(SciERCReader):
         for sample in samples:
             yield self.process_sample(sample)
 
-    def tokenize(self, sentence):
+    def tokenize(self, sentence: str):
         tokens = self.tokenizer.tokenize(sentence)
 
-        words = []
-        char_to_token_id: List[int] = [-1 for _ in sentence]
-        for token_id, token in enumerate(tokens):
+        words: List[str] = []
+        starts: Dict[int, int] = dict()
+        ends: Dict[int, int] = dict()
+        for idx, token in enumerate(tokens):
             words.append(token.text)
             start = token.idx
             end = start + len(token.text)
-            for position in range(start, end):
-                char_to_token_id[position] = token_id
+            starts[start] = idx
+            ends[end] = idx
 
-        return tokens, words, char_to_token_id
+        mappings = starts, ends
+
+        return tokens, words, mappings
 
     def process_sample(self, sample: Dict[str, Any]):
         sample_id = sample['id']
@@ -59,10 +62,12 @@ class BioRelExDatasetReader(SciERCReader):
         # between different tokens.
 
         # In biorelex, there is only sentence in the sample.
-        tokens, words, char_to_token_id = self.tokenize(text)
+        tokens, words, token_mappings = self.tokenize(text)
         sentences = [words]
         sentences_tokens = [tokens]
         raw_sentences = [text]
+        
+        token_starts, token_ends = token_mappings
 
         entities = sample.get('entities')
         if entities is not None:
@@ -73,8 +78,10 @@ class BioRelExDatasetReader(SciERCReader):
                 ner_label = entity['label']
                 for name, mentions in entity['names'].items():
                     for begin, end in mentions['mentions']:
-                        first = char_to_token_id[begin]
-                        last = char_to_token_id[end - 1]
+                        first = token_starts.get(begin)
+                        last = token_ends.get(end)
+                        if first is None or last is None:
+                            continue
                         position = (first, last)
                         cluster.add(position)
                         ner_labels.append((position, ner_label))
