@@ -1,4 +1,5 @@
-# YARX
+<img src="yarx.svg" width="300"> 
+
 Yet Another Relation Extraction framework, based on [SciIE architecture](http://nlp.cs.washington.edu/sciIE/).
 
 # Getting Started
