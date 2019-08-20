@@ -115,16 +115,14 @@ class SciIEPredictor(CorefPredictor):
 
         return True
 
-    def _format_interactions(self, interactions: List[Tuple[Tuple[int, int], str]]):
+    def _format_interactions(self, interactions: Dict[Tuple[int, int], str]):
         return [self._format_interaction(interaction)
-                for interaction in interactions
+                for interaction in interactions.items()
                 if self._filter_interaction(interaction)]
 
 
 
     def decode(self, instance: Instance, output_dict):
-        metadata = cast(MetadataField, instance['metadata']).metadata
-
         clusters = output_dict['entities']
         output_dict['entities'] = self._format_clusters(clusters)
 
@@ -133,7 +131,7 @@ class SciIEPredictor(CorefPredictor):
 
 
         # We keep id-s in order to make it easy for evaluation stage.
-        output_dict['id'] = metadata['id']
+        output_dict['id'] = instance['id'].metadata
 
         filtered_output = dict()
         for key in output_dict:

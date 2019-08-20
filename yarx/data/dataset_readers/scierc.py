@@ -67,27 +67,6 @@ class SciERCReader(DatasetReader):
             if line:
                 yield self._read_line(line)
 
-        #
-        #
-        # ontonotes_reader = Ontonotes()
-        # for sentences in ontonotes_reader.dataset_document_iterator(file_path):
-        #     clusters: DefaultDict[int, List[Tuple[int, int]]] = collections.defaultdict(list)
-        #
-        #     total_tokens = 0
-        #     for sentence in sentences:
-        #         for typed_span in sentence.coref_spans:
-        #             # Coref annotations are on a _per sentence_
-        #             # basis, so we need to adjust them to be relative
-        #             # to the length of the document.
-        #             span_id, (start, end) = typed_span
-        #             clusters[span_id].append((start + total_tokens,
-        #                                       end + total_tokens))
-        #         total_tokens += len(sentence.words)
-        #
-        #     canonical_clusters = canonicalize_clusters(clusters)
-        #     yield self.text_to_instance([s.words for s in sentences], canonical_clusters)
-
-
     def _read_line(self, line: str) -> Instance:
         sample = json.loads(line)
 
@@ -97,11 +76,11 @@ class SciERCReader(DatasetReader):
             for cluster in sample['clusters']
         ]
 
-        relations: List[List[Tuple[str, Tuple[int, int], Tuple[int, int]]]] = [
-            [
-                (relation[-1], tuple(relation[0:2]), tuple(relation[2:4]))
+        relations: List[Dict[Tuple[Tuple[int, int], Tuple[int, int]], str]] = [
+            {
+                (tuple(relation[0:2]), tuple(relation[2:4])): relation[-1]
                 for relation in sentence
-            ] for sentence in sample['relations']
+            } for sentence in sample['relations']
         ]
 
         instance = self.build_instance(sentences, clusters, relations)
@@ -112,15 +91,15 @@ class SciERCReader(DatasetReader):
     def text_to_instance(self,  # type: ignore
                          doc: List[List[str]],
                          clusters: Optional[List[List[Tuple[int, int]]]] = None,
-                         doc_relations: List[List[Tuple[str, Tuple[int, int], Tuple[int, int]]]] = None) -> Instance:
+                         doc_relations: List[Dict[Tuple[Tuple[int, int], Tuple[int, int]], str]] = None) -> Instance:
         return self.build_instance(doc, clusters, doc_relations)
 
     # noinspection PyTypeChecker
     def build_instance(self,  # type: ignore
                        doc: List[List[str]],
                        clusters: List[List[Tuple[int, int]]] = None,
-                       doc_relations: List[List[Tuple[str, Tuple[int, int], Tuple[int, int]]]] = None,
-                       doc_ner_labels: List[List[Tuple[Tuple[int, int], str]]] = None,
+                       doc_relations: List[Dict[Tuple[Tuple[int, int], Tuple[int, int]], str]] = None,
+                       doc_ner_labels: List[Dict[Tuple[int, int], str]] = None,
                        **kwargs) -> Instance:
         """
         Parameters
@@ -215,19 +194,18 @@ class SciERCReader(DatasetReader):
 
         """
 
-        metadata: Dict[str, Any] = {}
+        metadatas: Dict[str, Any] = {}
 
+        flattened_doc = [self._normalize_word(word)
+                         for sentence in doc
+                         for word in sentence]
+        metadatas["doc_tokens"] = doc
+        metadatas["original_text"] = flattened_doc
 
-        flattened_sentences = [self._normalize_word(word)
-                               for sentence in doc
-                               for word in sentence]
-        metadata["doc_tokens"] = doc
-        metadata["original_text"] = flattened_sentences
-
-        metadata.update(kwargs)
+        metadatas.update(kwargs)
 
         text_field = TextField([
-            Token(word) for word in flattened_sentences
+            Token(word) for word in flattened_doc
         ], self._token_indexers)
 
 
@@ -269,7 +247,6 @@ class SciERCReader(DatasetReader):
         #         inverse_mapping[sentence_id, real_index] = gold_index
 
 
-        metadata_field = MetadataField(metadata)
 
         # sentences_spans_field = ListField([
         #     ListField(spans) for spans in sentences_span_indices
@@ -279,14 +256,13 @@ class SciERCReader(DatasetReader):
         fields: Dict[str, Field] = {
             "text": text_field,
             "spans": spans_field,
-            "metadata": metadata_field,
             "doc_span_offsets": doc_span_offsets_field
         }
 
-
         # TODO TODO TODO rename sentences to doc, sencence to snt
 
-
+        for key, value in metadatas.items():
+            fields[key] = MetadataField(value)
 
         if clusters is None or doc_relations is None:
             return Instance(fields)
@@ -298,18 +274,16 @@ class SciERCReader(DatasetReader):
         #               TRUTH AFTER THIS ONLY
         #
 
-        metadata["clusters"] = clusters
+        fields["clusters"] = MetadataField(clusters)
         cluster_dict = {
             (start, end): cluster_id
             for cluster_id, cluster in enumerate(clusters)
             for start, end in cluster
         }
 
-
-        metadata["doc_relations"] = doc_relations
         truth_spans = {span
                        for sentence in doc_relations
-                       for label, *spans in sentence
+                       for spans, label in sentence.items()
                        for span in spans}
         fields["truth_spans"] = MetadataField(truth_spans)
 
@@ -388,7 +362,7 @@ class SciERCReader(DatasetReader):
                                     doc_spans_in_truth_field):
 
             relations = collections.defaultdict(str)
-            for label, span_a, span_b in truth_relations:
+            for (span_a, span_b), label in truth_relations.items():
                 # Span absolute indices (document-wide indexing)
                 try:
                     a_absolute_index = spans.index(span_a)
@@ -421,7 +395,7 @@ class SciERCReader(DatasetReader):
                 label_namespace="relation_labels"
             ))  # TODO pad with zeros maybe?
 
-        fields["doc_relations"] = MetadataField(doc_relations)
+        # fields["doc_relations"] = MetadataField(doc_relations)
         fields["doc_relation_labels"] = ListField(doc_relex_matrices)
 
 
@@ -474,19 +448,11 @@ class SciERCReader(DatasetReader):
             return Instance(fields)
 
 
-        doc_ner_dict = [
-            {
-                (start, end): label
-                for (start, end), label in sentence
-            }
-            for sentence in doc_ner_labels
-        ]
-
         # NER
         doc_ner: List[OptionalListField[LabelField]] = []
 
         sentence_offset = 0
-        for sentence, sentence_ner_dict in zip(doc, doc_ner_dict):
+        for sentence, sentence_ner_dict in zip(doc, doc_ner_labels):
             sentence_ner_labels: List[LabelField] = []
 
             for start, end in enumerate_spans(sentence,

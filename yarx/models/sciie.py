@@ -91,7 +91,7 @@ class SciIE(CoreferenceResolver):
                  loss_ner_weight: float = 1,
                  preserve_metadata: List = None,
                  relex_namespace: str = 'relation_labels',
-                 collect_clusters: bool = True) -> None:
+                 collect_clusters: bool = False) -> None:
         # If separate coref mention and relex mention feedforward scorers
         # are not provided, share the one of NER module
         if coref_mention_feedforward is None:
@@ -142,15 +142,15 @@ class SciIE(CoreferenceResolver):
     def forward(self,  # type: ignore
                 text: Dict[str, torch.LongTensor],
                 spans: torch.IntTensor,
-                metadata: List[Dict[str, Any]],
                 doc_span_offsets: torch.IntTensor,
                 span_labels: torch.IntTensor = None,
                 doc_truth_spans: torch.IntTensor = None,
                 doc_spans_in_truth: torch.IntTensor = None,
                 doc_relation_labels: torch.Tensor = None,
                 truth_spans: List[Set[Tuple[int, int]]] = None,
-                doc_relations = None,
+                # doc_relations = None,
                 doc_ner_labels: torch.IntTensor = None,
+                **metadata: Dict[str, List[Any]]
                 ) -> Dict[str, torch.Tensor]:  # add matrix from datareader
         # pylint: disable=arguments-differ
         """
@@ -207,9 +207,9 @@ class SciIE(CoreferenceResolver):
 
         batch_size = len(spans)
         document_length = text_embeddings.size(1)
-        max_sentence_length = max(len(sentence)
-                                  for document in metadata
-                                  for sentence in document['doc_tokens'])
+        max_sentence_length = max(len(sentence_tokens)
+                                  for doc_tokens in metadata['doc_tokens']
+                                  for sentence_tokens in doc_tokens)
         num_spans = spans.size(1)
 
         # Shape: (batch_size, document_length)
@@ -324,10 +324,8 @@ class SciIE(CoreferenceResolver):
         output_dict = dict()
 
         # Store raw text and tokens for decoding step
-        output_dict["flat_tokens"] = [sample_metadata["flat_tokens"]
-                                      for sample_metadata in metadata]
-        output_dict["flat_text"] = [sample_metadata["flat_text"]
-                                    for sample_metadata in metadata]
+        output_dict["flat_tokens"] = metadata["flat_tokens"]
+        output_dict["flat_text"] = metadata["flat_text"]
 
         output_dict["top_spans"] = top_spans
         output_dict["antecedent_indices"] = valid_antecedent_indices
@@ -335,7 +333,7 @@ class SciIE(CoreferenceResolver):
 
 
         if metadata is not None:
-            output_dict["document"] = [x["original_text"] for x in metadata]
+            output_dict["document"] = metadata["original_text"]
 
         # Shape: (,)
         loss = 0
@@ -411,15 +409,16 @@ class SciIE(CoreferenceResolver):
             negative_marginal_log_likelihood *= top_span_mask.squeeze(-1).float()
             negative_marginal_log_likelihood = negative_marginal_log_likelihood.sum()
 
-            self._mention_recall(top_spans, metadata)
-            self._conll_coref_scores(top_spans, valid_antecedent_indices, predicted_antecedents, metadata)
+            # TODO Modify metadata format
+            # self._mention_recall(top_spans, metadata)
+            # self._conll_coref_scores(top_spans, valid_antecedent_indices, predicted_antecedents, metadata)
 
             coref_loss = negative_marginal_log_likelihood
             output_dict['coref_loss'] = coref_loss
             loss += self._loss_coref_weight * coref_loss
 
 
-        if doc_relations is not None:
+        if doc_relation_labels is not None:
 
             # The adjacency matrix for relation extraction is very sparse.
             # As it is not just sparse, but row/column sparse (only few
@@ -456,7 +455,11 @@ class SciIE(CoreferenceResolver):
 
             self._relex_mention_recall(top_relex_spans.view(batch_size, -1, 2),
                                        truth_spans)
-            self._compute_relex_metrics(output_dict, doc_relations)
+
+            # To calculate F1 score, we need to to call decode step
+            output_dict = self.decode(output_dict)
+            self._compute_relex_metrics(output_dict['raw_interactions'],
+                                        metadata['doc_raw_relations'])
 
             loss += self._loss_relex_weight * relex_loss
 
@@ -478,30 +481,29 @@ class SciIE(CoreferenceResolver):
 
         return output_dict
 
-    def _compute_relex_metrics(self, output_dict, doc_relations):
+    def _compute_relex_metrics(self,
+                               batch_predicted_relations,
+                               batch_doc_raw_relations):
         """
         Compute Relation Extraction metrics. Note, this is not the same as
         in original BioRelEx task evaluation which is a bit complicated.
         """
-        output_dict = self.decode(output_dict)  # To calculate F1 score, we need to to call decode step
-        batch_predicted_relations = output_dict['relex_predictions']
 
-        for sample_predictions, sample_relations in zip(batch_predicted_relations,
-                                                        doc_relations):
-            for sentence_predictions, sentence_relations in zip(sample_predictions,
-                                                                sample_relations):
-                candidates = defaultdict(lambda: defaultdict(str))
+        # Evaluation is done on document level.
+        for doc_predictions, doc_relations in zip(batch_predicted_relations,
+                                                  batch_doc_raw_relations):
+            # TODO Change Metrics interface, feed raw sets
+            # TODO Decode sentence_predictions as dict, not list of triples
 
-                for predicted_label, a, b in sentence_predictions:
-                    candidates[a, b]['prediction'] = predicted_label
+            predicted_labels = []
+            true_labels = []
 
-                for true_label, a, b in sentence_relations:
-                    candidates[a, b]['label'] = true_label
+            keys = set(doc_predictions.keys()) | set(doc_relations.keys())
+            for key in keys:
+                predicted_labels.append(doc_predictions.get(key, ''))
+                true_labels.append(doc_relations.get(key, ''))
 
-                predicted_labels = [candidate['prediction'] for candidate in candidates.values()]
-                true_labels = [candidate['label'] for candidate in candidates.values()]
-
-                self._relex_precision_recall_fscore(predicted_labels, true_labels)
+            self._relex_precision_recall_fscore(predicted_labels, true_labels)
 
     @overrides
     def decode(self, output_dict: Dict[str, Any]) -> Dict[str, Any]:
@@ -521,23 +523,21 @@ class SciIE(CoreferenceResolver):
         batch_flat_tokens: List[List[Token]] = output_dict['flat_tokens']
         batch_flat_text: List[str] = output_dict['flat_text']
 
-        batch_entities = []
-        batch_interactions = []
+        batch_updates = defaultdict(list)
         for (clusters, relations,
              flat_tokens, flat_text) in zip(batch_clusters, batch_relex_predictions,
                                             batch_flat_tokens, batch_flat_text):
-            entities, interactions = self._decode_sample(clusters, relations,
-                                                         flat_tokens, flat_text)
-            batch_entities.append(entities)
-            batch_interactions.append(interactions)
-        output_dict['entities'] = batch_entities
-        output_dict['interactions'] = batch_interactions
+            updates = self._decode_sample(clusters, relations,
+                                          flat_tokens, flat_text)
+            for key, value in updates.items():
+                batch_updates[key].append(value)
 
+        output_dict.update(batch_updates)
         return output_dict
 
     def _decode_sample(self,
                        clusters: List[List[Tuple[int, int]]],
-                       relations: List[List[Tuple[str, Tuple[int, int], Tuple[int, int]]]],
+                       relations: List[Dict[Tuple[Tuple[int, int], Tuple[int, int]], str]],
                        flat_tokens: List[Token],
                        flat_text: str):
         # TODO check multi sentence decoding
@@ -554,45 +554,16 @@ class SciIE(CoreferenceResolver):
 
         cluster_manager.lock_clusters()
 
-        interactions: List[Tuple[List[int], str]] = []
         for sentence_relations in relations:
-            for label, *participants in sentence_relations:
-                participant_ids: List[int] = []
-                for first_idx, last_idx in participants:
-                    participant_id = cluster_manager.add_mention(first_idx, last_idx)
-                    # if (start, end) in span_registry:
-                    #     participant_id = span_registry[start, end]
-                    # else:
-                    #     participant_id = len(entities)
-                    #     span_registry[start, end] = participant_id
-                    #     entities.append({
-                    #         "is_state": False,
-                    #         "label": "TODO",
-                    #         "is_mentioned": True,
-                    #         "is_mutant": False,
-                    #         "names": {
-                    #             name: {
-                    #                 "is_mentioned": True,
-                    #                 "mentions": [
-                    #                     [start, end]
-                    #                 ]
-                    #             }
-                    #         }
-                    #     })
-                    participant_ids.append(participant_id)
-                # # The binding relation is symmetric: remove redundant relations
-                # if participant_ids[0] > participant_ids[1]:
-                #     continue  # TODO union
-                # interactions.append({
-                #     "participants": participant_ids,
-                #     "type": label,
-                #     "implicit": False,
-                #     "label": 1
-                # })
+            for participants, label in sentence_relations.items():
+                # TODO What to do if relation is predicted within same cluster?
+                cluster_manager.add_interaction(participants, label)
 
-                interaction: Tuple[List[int], str] = (participant_ids, label)
-                interactions.append(interaction)
-        return cluster_manager.clusters, interactions
+        return {
+            'entities': cluster_manager.clusters,
+            'raw_interactions': cluster_manager.raw_interactions,
+            'interactions': cluster_manager.interactions
+        }
 
     def _decode_relex_predictions(self, output_dict: Dict[str, Any]):
         # TODO check multi sentence decoding
@@ -605,7 +576,7 @@ class SciIE(CoreferenceResolver):
         for doc_scores, doc_spans in zip(batch_scores, batch_spans):
             doc_predictions = []
             for scores, spans in zip(doc_scores, doc_spans):
-                sentence_predictions = []
+                sentence_predictions = dict()
 
                 predicted_labels = scores.argmax(-1)
                 nonzero_indices = predicted_labels.nonzero()
@@ -616,12 +587,11 @@ class SciIE(CoreferenceResolver):
                 numerical_labels = predicted_labels[tuple(nonzero_indices.t())].tolist()  # TODO simplify
                 relations = spans[nonzero_indices].tolist()
                 for numerical_label, relation in zip(numerical_labels, relations):
-                    first_span = tuple(relation[0])
-                    second_span = tuple(relation[1])
+                    first_span: Tuple[int, int] = tuple(relation[0])
+                    second_span: Tuple[int, int] = tuple(relation[1])
                     label = self.vocab.get_token_from_index(numerical_label,
                                                             self._relex_namespace)
-                    relation = (label, first_span, second_span)
-                    sentence_predictions.append(relation)
+                    sentence_predictions[first_span, second_span] = label
 
                 doc_predictions.append(sentence_predictions)
             batch_predictions.append(doc_predictions)
