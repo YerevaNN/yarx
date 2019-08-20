@@ -1,17 +1,20 @@
 import json
 from collections import defaultdict
-from typing import List, cast
+from typing import List, cast, Tuple, Dict, Set
 
 from allennlp.common import JsonDict
 from allennlp.common.util import sanitize
-from allennlp.data import Instance, DatasetReader
+from allennlp.data import Instance, DatasetReader, Token
 from allennlp.data.fields import MetadataField
 from allennlp.models import Model
 from allennlp.predictors import CorefPredictor, Predictor
 from overrides import overrides
 
+from .models.decoder import Cluster
 
-@Predictor.register('sciie')
+
+@Predictor.register('sciie')  # for backward compatibility
+@Predictor.register('biorelex')
 class SciIEPredictor(CorefPredictor):
     """
     Predictor for SciIE model.
@@ -21,6 +24,7 @@ class SciIEPredictor(CorefPredictor):
                  model: Model,
                  dataset_reader: DatasetReader,
                  language: str = 'en_core_web_sm') -> None:
+        self._decode_clusters = True
         self._key_whitelist = [
             'id',
             'text',
@@ -70,88 +74,63 @@ class SciIEPredictor(CorefPredictor):
                    in zip(instances, outputs)]
         return sanitize(outputs)
 
+
+    def _format_cluster(self, cluster: Cluster):
+        names = {}
+        for name, mention in cluster.entities:
+            if name not in names:
+                names[name] = {
+                    'is_mentioned': True,
+                    'mentions': []
+                }
+            names[name]['mentions'].append(mention)
+
+        return {
+            'is_state': False,
+            'label': "TODO",  # TODO
+            'is_mentioned': True,
+            'is_mutant': False,
+            'names': names
+        }
+
+    def _format_clusters(self, clusters: List[Cluster]):
+        return [self._format_cluster(cluster)
+                for cluster in clusters]
+
+    def _format_interaction(self, interaction: Tuple[Tuple[int, int], str]):
+        participant_ids, label = interaction
+
+        return {
+            'participants': participant_ids,
+            'type': label,
+            'implicit': False,
+            'label': 1
+        }
+
+    def _filter_interaction(self, interaction: Tuple[Tuple[int, int], str]):
+        participant_ids, label = interaction
+
+        if participant_ids[0] > participant_ids[1]:
+            return False
+
+        return True
+
+    def _format_interactions(self, interactions: List[Tuple[Tuple[int, int], str]]):
+        return [self._format_interaction(interaction)
+                for interaction in interactions
+                if self._filter_interaction(interaction)]
+
+
+
     def decode(self, instance: Instance, output_dict):
         metadata = cast(MetadataField, instance['metadata']).metadata
 
-        clusters = output_dict['clusters']
-        relations = output_dict['relex_predictions']
+        clusters = output_dict['entities']
+        output_dict['entities'] = self._format_clusters(clusters)
 
-        span_registry = dict()
+        interactions = output_dict['interactions']
+        output_dict['interactions'] = self._format_interactions(interactions)
 
-        entities = []
-        interactions = []
-
-        for cluster in clusters:
-            names = defaultdict(lambda: {
-                "is_mentioned": True,
-                "mentions": []
-            })
-
-            for first_idx, last_idx in cluster:
-                first = metadata['flat_tokens'][first_idx]
-                last = metadata['flat_tokens'][last_idx]
-
-                start = first.idx
-                end = last.idx + len(last.text)
-
-                name = metadata['flat_text'][start:end]
-                span_registry[start, end] = len(entities)
-
-                names[name]['mentions'].append((start, end))
-
-            entities.append({
-                "is_state": False,
-                "label": "TODO",  # TODO
-                "is_mentioned": True,
-                "is_mutant": False,
-                "names": names
-            })
-
-        for sentence_relations in relations:
-            for label, *participants in sentence_relations:
-                participant_ids = []
-                for first_idx, last_idx in participants:
-                    first = metadata['flat_tokens'][first_idx]
-                    last = metadata['flat_tokens'][last_idx]
-
-                    start = first.idx
-                    end = last.idx + len(last.text)
-
-                    name = metadata['flat_text'][start:end]
-
-                    if (start, end) in span_registry:
-                        participant_id = span_registry[start, end]
-                    else:
-                        participant_id = len(entities)
-                        entities.append({
-                            "is_state": False,
-                            "label": "TODO",
-                            "is_mentioned": True,
-                            "is_mutant": False,
-                            "names": {
-                                name: {
-                                    "is_mentioned": True,
-                                    "mentions": [
-                                        [start, end]
-                                    ]
-                                }
-                            }
-                        })
-                    participant_ids.append(participant_id)
-
-                # The binding relation is symmetric: remove redundant relations
-                if participant_ids[0] > participant_ids[1]:
-                    continue  # TODO union
-
-                interactions.append({
-                    "participants": participant_ids,
-                    "type": label,
-                    "implicit": False,
-                    "label": 1
-                })
-
-        output_dict['entities'] = entities
-        output_dict['interactions'] = interactions
 
         # We keep id-s in order to make it easy for evaluation stage.
         output_dict['id'] = metadata['id']

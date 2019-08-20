@@ -7,7 +7,7 @@ from allennlp.models import CoreferenceResolver
 from torch.nn import Sequential
 from torch.nn import functional as F
 
-from allennlp.data import Vocabulary
+from allennlp.data import Vocabulary, Token
 from allennlp.models.model import Model
 from allennlp.modules import FeedForward
 from allennlp.modules import Seq2SeqEncoder, TimeDistributed, TextFieldEmbedder, Pruner
@@ -17,10 +17,10 @@ from allennlp.nn import util, InitializerApplicator, RegularizerApplicator
 from overrides import overrides
 from typing import Any, Dict, List, Optional, Tuple, Set
 
-
 from ..layers import MultiTimeDistributed, Projection
 from ..metrics import PrecisionRecallFScore, RelexMentionRecall
 from ..utils import nd_batched_index_select, nd_batched_padded_index_select, nd_cross_entropy_with_logits
+from .decoder import ClusterManager
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 
@@ -90,7 +90,8 @@ class SciIE(CoreferenceResolver):
                  loss_relex_weight: float = 1,
                  loss_ner_weight: float = 1,
                  preserve_metadata: List = None,
-                 relex_namespace: str = 'relation_labels') -> None:
+                 relex_namespace: str = 'relation_labels',
+                 collect_clusters: bool = True) -> None:
         # If separate coref mention and relex mention feedforward scorers
         # are not provided, share the one of NER module
         if coref_mention_feedforward is None:
@@ -111,6 +112,7 @@ class SciIE(CoreferenceResolver):
         self._loss_ner_weight = loss_ner_weight
         self._preserve_metadata = preserve_metadata or ['id']
         self._relex_namespace = relex_namespace
+        self._collect_clusters = collect_clusters
 
         relex_labels = list(vocab.get_token_to_index_vocabulary(self._relex_namespace))
         self._relex_mention_recall = RelexMentionRecall()
@@ -321,6 +323,12 @@ class SciIE(CoreferenceResolver):
 
         output_dict = dict()
 
+        # Store raw text and tokens for decoding step
+        output_dict["flat_tokens"] = [sample_metadata["flat_tokens"]
+                                      for sample_metadata in metadata]
+        output_dict["flat_text"] = [sample_metadata["flat_text"]
+                                    for sample_metadata in metadata]
+
         output_dict["top_spans"] = top_spans
         output_dict["antecedent_indices"] = valid_antecedent_indices
         output_dict["predicted_antecedents"] = predicted_antecedents
@@ -505,17 +513,93 @@ class SciIE(CoreferenceResolver):
         if 'relex_predictions' in output_dict:
             return output_dict
 
-        output_dict = super().decode(output_dict)
+        output_dict: Dict[str, Any] = super().decode(output_dict)
+        batch_relex_predictions = self._decode_relex_predictions(output_dict)
+        output_dict['relex_predictions'] = batch_relex_predictions
 
-        relex_predictions = self._decode_relex_predictions(output_dict['relex_scores'],
-                                                           output_dict['top_relex_spans'])
-        output_dict['relex_predictions'] = relex_predictions
+        batch_clusters: List[List[List[Tuple[int, int]]]] = output_dict['clusters']
+        batch_flat_tokens: List[List[Token]] = output_dict['flat_tokens']
+        batch_flat_text: List[str] = output_dict['flat_text']
+
+        batch_entities = []
+        batch_interactions = []
+        for (clusters, relations,
+             flat_tokens, flat_text) in zip(batch_clusters, batch_relex_predictions,
+                                            batch_flat_tokens, batch_flat_text):
+            entities, interactions = self._decode_sample(clusters, relations,
+                                                         flat_tokens, flat_text)
+            batch_entities.append(entities)
+            batch_interactions.append(interactions)
+        output_dict['entities'] = batch_entities
+        output_dict['interactions'] = batch_interactions
+
         return output_dict
 
-    def _decode_relex_predictions(self, batch_scores, batch_spans):
+    def _decode_sample(self,
+                       clusters: List[List[Tuple[int, int]]],
+                       relations: List[List[Tuple[str, Tuple[int, int], Tuple[int, int]]]],
+                       flat_tokens: List[Token],
+                       flat_text: str):
+        # TODO check multi sentence decoding
+
+        # clusters = output_dict['clusters']
+        # relations = output_dict['relex_predictions']
+
+        cluster_manager = ClusterManager(flat_tokens, flat_text)
+
+        if self._collect_clusters:
+            for cluster_id, cluster in enumerate(clusters):
+                for first_idx, last_idx in cluster:
+                    cluster_manager.add_mention(first_idx, last_idx, cluster_id)
+
+        cluster_manager.lock_clusters()
+
+        interactions: List[Tuple[List[int], str]] = []
+        for sentence_relations in relations:
+            for label, *participants in sentence_relations:
+                participant_ids: List[int] = []
+                for first_idx, last_idx in participants:
+                    participant_id = cluster_manager.add_mention(first_idx, last_idx)
+                    # if (start, end) in span_registry:
+                    #     participant_id = span_registry[start, end]
+                    # else:
+                    #     participant_id = len(entities)
+                    #     span_registry[start, end] = participant_id
+                    #     entities.append({
+                    #         "is_state": False,
+                    #         "label": "TODO",
+                    #         "is_mentioned": True,
+                    #         "is_mutant": False,
+                    #         "names": {
+                    #             name: {
+                    #                 "is_mentioned": True,
+                    #                 "mentions": [
+                    #                     [start, end]
+                    #                 ]
+                    #             }
+                    #         }
+                    #     })
+                    participant_ids.append(participant_id)
+                # # The binding relation is symmetric: remove redundant relations
+                # if participant_ids[0] > participant_ids[1]:
+                #     continue  # TODO union
+                # interactions.append({
+                #     "participants": participant_ids,
+                #     "type": label,
+                #     "implicit": False,
+                #     "label": 1
+                # })
+
+                interaction: Tuple[List[int], str] = (participant_ids, label)
+                interactions.append(interaction)
+        return cluster_manager.clusters, interactions
+
+    def _decode_relex_predictions(self, output_dict: Dict[str, Any]):
+        # TODO check multi sentence decoding
+
         # Transfer tensors to cpu to make interaction faster
-        batch_scores = batch_scores.detach().cpu()
-        batch_spans = batch_spans.detach().cpu()
+        batch_scores = output_dict['relex_scores'].detach().cpu()
+        batch_spans = output_dict['top_relex_spans'].detach().cpu()
 
         batch_predictions = []
         for doc_scores, doc_spans in zip(batch_scores, batch_spans):
