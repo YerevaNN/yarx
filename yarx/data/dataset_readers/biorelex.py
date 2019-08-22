@@ -45,6 +45,8 @@ class BioRelExDatasetReader(SciERCReader):
         for idx, token in enumerate(tokens):
             words.append(token.text)
             start = token.idx
+            # TODO Don't always rely on tokenizer char-based offsets
+            # e.g. AllenNLP Bert tokenizer doesn't provide mappings out-of-the-box
             end = start + len(token.text)
             starts[start] = idx
             ends[end] = idx
@@ -105,24 +107,6 @@ class BioRelExDatasetReader(SciERCReader):
                     ner_labels[position] = raw_ner_labels[begin, end]
                 clusters.append(positions)
 
-            #
-            #
-            # for idx, entity in enumerate(entities):
-            #     cluster = list()
-            #     ner_label = entity['label']
-            #     for name, mentions in entity['names'].items():
-            #         for begin, end in mentions['mentions']:
-            #             first = token_starts.get(begin)
-            #             last = token_ends.get(end)
-            #             if first is None or last is None:
-            #                 logger.warning('Cannot represent span as sequence of tokens.')
-            #                 continue
-            #             position = (first, last)
-            #             cluster.append(position)
-            #             ner_labels[position] = ner_label
-            #
-            #     clusters.append(cluster)
-
             doc_ner_labels = [ner_labels]
         else:
             raw_clusters = None
@@ -156,17 +140,6 @@ class BioRelExDatasetReader(SciERCReader):
                         relations[b, a] = label
 
 
-            # relations: List[Tuple[str, Tuple[int, int], Tuple[int, int]]] = []
-            # for interaction in sample['interactions']:
-            #     # in biorelex, the relations are symmetrical
-            #     label = interaction['type']
-            #     a_id, b_id = interaction['participants']
-            #     if interaction['label'] not in self._positive_labels:
-            #         continue
-            #     for a in clusters[a_id]:
-            #         for b in clusters[b_id]:
-            #             relations.append((label, a, b))
-            #             relations.append((label, b, a))
             doc_raw_relations = raw_relations
             doc_relations = [relations]
         else:
