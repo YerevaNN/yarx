@@ -10,20 +10,22 @@ class PrecisionRecallFScore(Metric):
                  beta: float = 1,
                  labels: Iterable[str] = None,
                  average: str = None,
-                 pos_label: str = None) -> None:
+                 pos_label: str = None,
+                 verbose: bool = True) -> None:
         self._beta = beta
         self._average = average
         self._labels = list(labels)
         self._pos_label = pos_label
+        self._verbose = verbose
 
-        self._current_predictions: List[Any] = None
-        self._current_labels: List[Any] = None
+        self._current_predictions: List[List[Any]] = None
+        self._current_labels: List[List[Any]] = None
 
         self.reset()
 
     def __call__(self,
-                 predictions: Iterable[Any],
-                 gold_labels: Iterable[Any]):
+                 predictions: List[Any],
+                 gold_labels: List[Any]):
         """
         Parameters
         ----------
@@ -32,18 +34,36 @@ class PrecisionRecallFScore(Metric):
         gold_labels : ``torch.Tensor``, required.
             A set of ground truth.
         """
-        self._current_predictions.extend(predictions)
-        self._current_labels.extend(gold_labels)
+        self._current_predictions.append(predictions)
+        self._current_labels.append(gold_labels)
 
     def get_metric(self,
                    reset: bool) -> Union[float, Tuple[float, ...], Dict[str, float]]:
         """
         Compute and return the metric. Optionally also call :func:`self.reset`.
         """
-        y_true = self._current_labels
-        y_pred = self._current_predictions
 
+        # Flatten
+        y_true = [y for ys in self._current_labels for y in ys]
+        y_pred = [y for ys in self._current_predictions for y in ys]
+
+        scores = self._get_metric_on(y_true, y_pred)
+
+        if reset:
+            self.reset()
+            return scores
+
+        # Report incomplete scores only if `verbose` is set
+        if self._verbose:
+            return scores
+
+        # Wait for `reset=True` to report complete scores.
+        return dict()
+
+
+    def _get_metric_on(self, y_true, y_pred):
         # TODO Against multiple sub-splits
+        # TODO Evaluate with our own code, optimize
         prfs = precision_recall_fscore_support(y_true,
                                                y_pred,
                                                beta=self._beta,
@@ -51,8 +71,6 @@ class PrecisionRecallFScore(Metric):
                                                average=self._average,
                                                pos_label=self._pos_label)
         cm = multilabel_confusion_matrix(y_true, y_pred, labels=self._labels)
-        if reset:
-            self.reset()
 
         # Now we have precision, recall and f_beta score for all the labels
         # We are going to report scores for all the labels besides null-label.
@@ -71,8 +89,9 @@ class PrecisionRecallFScore(Metric):
 
             scores[f'{class_name}_tn'] = int(tn)
             scores[f'{class_name}_fp'] = int(fp)
-            scores[f'{class_name}_fn'] = int(fn)
+            # scores[f'{class_name}_fn'] = int(fn)
             scores[f'{class_name}_tp'] = int(tp)
+
 
         return scores
 
